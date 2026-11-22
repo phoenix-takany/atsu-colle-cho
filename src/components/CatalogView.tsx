@@ -57,7 +57,8 @@ export default function CatalogView({
   const [draftName, setDraftName] = useState(initialDisplayName);
   const [savingName, setSavingName] = useState(false);
   const [nameMessage, setNameMessage] = useState('');
-
+  const [ownedVariantKeys, setOwnedVariantKeys] = useState<Set<string>>(new Set());
+  
   const handleUpdateDisplayName = async (e: React.FormEvent) => {
     e.preventDefault();
     const trimmed = draftName.trim();
@@ -81,11 +82,23 @@ export default function CatalogView({
     setNameMessage('');
     };
   
-  const activeItem = useMemo(
-    () => initialItems.find((item) => item.id === activeItemId) ?? null,
-    [initialItems, activeItemId]
-  );
+    const activeItem = useMemo(
+      () => initialItems.find((item) => item.id === activeItemId) ?? null,
+      [initialItems, activeItemId]
+    );
 
+    const getColorEntries = (item: CatalogItem) => {
+    return (item.item_variants ?? []).flatMap((v) =>
+        (v.colors ?? []).map((color) => ({
+        variantId: v.id,
+        color,
+        imageUrl: v.image_url,
+        variantName: v.variant_name,
+        }))
+    );
+    };
+
+    
   // 初回マウント時にログイン状態と所持データを取得
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => {
@@ -148,6 +161,81 @@ export default function CatalogView({
 
     fetchOwned();
   }, [user]);
+
+    useEffect(() => {
+    if (!user) {
+        setOwnedVariantKeys(new Set());
+        return;
+    }
+
+    let cancelled = false;
+
+    const fetchOwnedVariants = async () => {
+        const { data, error } = await supabase
+        .from('user_variant_items')
+        .select('variant_id, color')
+        .eq('user_id', user.id);
+
+        if (error || cancelled || !data) return;
+
+        setOwnedVariantKeys(
+        new Set(data.map((row) => `${row.variant_id}:${row.color}`))
+        );
+    };
+
+    fetchOwnedVariants();
+
+    return () => {
+        cancelled = true;
+    };
+    }, [user]);
+
+    const toggleVariantColor = async (variantId: string, color: string) => {
+    if (!user) return;
+
+    const key = `${variantId}:${color}`;
+    const isOwned = ownedVariantKeys.has(key);
+
+    setOwnedVariantKeys((prev) => {
+        const next = new Set(prev);
+        if (isOwned) next.delete(key);
+        else next.add(key);
+        return next;
+    });
+
+    if (isOwned) {
+        const { error } = await supabase
+        .from('user_variant_items')
+        .delete()
+        .eq('user_id', user.id)
+        .eq('variant_id', variantId)
+        .eq('color', color);
+
+        if (error) {
+        setOwnedVariantKeys((prev) => {
+            const next = new Set(prev);
+            next.add(key);
+            return next;
+        });
+        }
+    } else {
+        const { error } = await supabase
+        .from('user_variant_items')
+        .insert({
+            user_id: user.id,
+            variant_id: variantId,
+            color,
+        });
+
+        if (error) {
+        setOwnedVariantKeys((prev) => {
+            const next = new Set(prev);
+            next.delete(key);
+            return next;
+        });
+        }
+    }
+    };
 
   // ログイン / 新規登録処理
   const handleAuthSubmit = async (e: React.FormEvent) => {
@@ -300,12 +388,35 @@ export default function CatalogView({
     }
   };
 
-  // 全体の所持数カウント
+// アイテム1件が「所持済み」か判定する共通関数
+// - カラバリあり（colors あり）：全色 ownedVariantKeys にあれば true
+// - カラバリなし（colors なし）：variant_id が ownedVariantIds にあれば true
+const isItemOwnedByColors = (
+  item: CatalogItem,
+  ownedVariantKeys: Set<string>,
+  ownedVariantIds: Set<string> = new Set()
+): boolean => {
+  const colorEntries = getColorEntries(item);
+
+  // カラバリ登録がないアイテムは、バリアントIDが ownedVariantIds にあるかで判定
+  if (colorEntries.length === 0) {
+    return (item.item_variants ?? []).some((v) =>
+      ownedVariantIds?.has(v.id)
+    );
+  }
+
+  // カラバリがある場合は、全色チェック済みなら所持済み
+  return colorEntries.every(({ variantId, color }) =>
+    ownedVariantKeys?.has(`${variantId}:${color}`)
+  );
+};
+
+// 全体の所持数カウント（色基準：全色所持 or カラバリなしで所持扱い）
   const ownedItemCount = useMemo(() => {
     return initialItems.filter((item) =>
-      item.item_variants.some((v) => ownedVariantIds.has(v.id))
+      isItemOwnedByColors(item, ownedVariantKeys, ownedVariantIds)
     ).length;
-  }, [initialItems, ownedVariantIds]);
+  }, [initialItems, ownedVariantKeys]);
 
   const completionRate =
     initialItems.length > 0
@@ -317,7 +428,7 @@ export default function CatalogView({
     if (selectedCategory === 'ALL') return null;
     const catItems = initialItems.filter((item) => item.category === selectedCategory);
     const catOwned = catItems.filter((item) =>
-      item.item_variants.some((v) => ownedVariantIds.has(v.id))
+      isItemOwnedByColors(item, ownedVariantKeys, ownedVariantIds)
     ).length;
     const rate =
       catItems.length > 0 ? ((catOwned / catItems.length) * 100).toFixed(1) : '0.0';
@@ -327,9 +438,9 @@ export default function CatalogView({
       total: catItems.length,
       rate,
     };
-  }, [initialItems, selectedCategory, ownedVariantIds]);
+  }, [initialItems, selectedCategory, ownedVariantKeys]);
 
-// 検索・カテゴリ・所持状態絞り込み
+  // 検索・カテゴリ・所持状態絞り込み
   const filteredItems = useMemo(() => {
     const q = search.trim().toLowerCase();
     return initialItems.filter((item) => {
@@ -337,7 +448,7 @@ export default function CatalogView({
         selectedCategory === 'ALL' || item.category === selectedCategory;
       if (!matchCategory) return false;
 
-      const isOwned = item.item_variants.some((v) => ownedVariantIds.has(v.id));
+      const isOwned = isItemOwnedByColors(item, ownedVariantKeys, ownedVariantIds);
       if (statusFilter === 'OWNED' && !isOwned) return false;
       if (statusFilter === 'UNOWNED' && isOwned) return false;
       if (statusFilter === 'MULTI' && item.item_variants.length <= 1) return false;
@@ -348,7 +459,7 @@ export default function CatalogView({
         item.name_en.toLowerCase().includes(q)
       );
     });
-  }, [initialItems, search, selectedCategory, statusFilter, ownedVariantIds]);
+  }, [initialItems, search, selectedCategory, statusFilter, ownedVariantKeys]);
 
   const totalPages = Math.max(1, Math.ceil(filteredItems.length / PAGE_SIZE));
   const currentPage = Math.min(page, totalPages);
@@ -595,7 +706,7 @@ export default function CatalogView({
         </div>
       </header>
 
-      {/* メインコンテンツ */}
+{/* メインコンテンツ */}
       <main className="mx-auto max-w-6xl px-4 py-6">
         {paginatedItems.length === 0 ? (
           <div className="rounded-2xl border border-[#e2dccb] bg-white p-12 text-center text-sm text-[#786e63]">
@@ -604,109 +715,133 @@ export default function CatalogView({
         ) : (
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
             {paginatedItems.map((item) => {
-              const ownedVariantsCount = item.item_variants.filter((v) =>
-                ownedVariantIds.has(v.id)
-              ).length;
-              const isOwned = ownedVariantsCount > 0;
-              const hasMultipleVariants = item.item_variants.length > 1;
+              // 1. item_variants から「色ごと」の選択肢を展開
+              const colorEntries = (item.item_variants ?? []).flatMap((v) =>
+                (v.colors ?? []).map((color) => ({
+                  variantId: v.id,
+                  color,
+                  imageUrl: v.image_url,
+                }))
+              );
 
-              // 所持中のバリエーションがあればその画像を優先表示
-              const displayVariant =
-                item.item_variants.find((v) => ownedVariantIds.has(v.id)) ??
-                item.item_variants?.[0];
-              const imageUrl = displayVariant?.image_url;
+              // 2. カラバリ有無・複数カラバリの判定
+              const totalColorsCount = colorEntries.length;
+              const hasColorVariants = totalColorsCount > 0;
+              const hasMultipleColorVariants = totalColorsCount > 1;
+
+              // 3. 色ごとの所持状態から、全色そろったら「所持（isOwned）」とする
+              const ownedColorEntries = colorEntries.filter(({ variantId, color }) =>
+              ownedVariantKeys.has(`${variantId}:${color}`)
+              );
+              const ownedColorsCount = ownedColorEntries.length;
+              
+              // カラバリありで全色そろったときだけ true、カラバリなしは false
+              const isOwned = hasColorVariants && ownedColorsCount === totalColorsCount;
+
+              // ★ ここ（各 item のループ内）に置く
+              const primaryVariant = item.item_variants?.[0];
+              const isNoColorOwned = primaryVariant
+                ? ownedVariantIds.has(primaryVariant.id)
+                : false;
+
+              // 4. 所持中の色があればそのバリアント画像を優先表示、なければ先頭
+              const displayImageUrl =
+                ownedColorEntries[0]?.imageUrl ??
+                item.item_variants?.[0]?.image_url;
 
               return (
-                <button
+                <div
                   key={item.id}
-                  type="button"
-                  onClick={() => handleCardClick(item)}
-                  className={`group relative flex flex-col justify-between rounded-2xl border p-3 text-left transition hover:-translate-y-0.5 hover:shadow-md ${
+                  className={`flex flex-col justify-between rounded-2xl border p-2.5 transition ${
                     isOwned
-                      ? 'border-[#3fa37a] bg-[#f0faf5] shadow-xs'
-                      : 'border-[#e5dec9] bg-white shadow-2xs hover:border-[#7bc4a4]'
+                      ? 'border-[#3fa37a] bg-[#f4fbf7]'
+                      : 'border-[#e2dccb] bg-white'
                   }`}
                 >
-                  {/* 所持バッジ */}
-                  <span
-                    className={`absolute right-2.5 top-2.5 flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold transition ${
-                      isOwned
-                        ? 'bg-[#2b6e53] text-white shadow-xs'
-                        : 'border border-[#d6cebc] bg-white/80 text-transparent group-hover:border-[#7bc4a4]'
-                    }`}
-                  >
-                    ✓
-                  </span>
+                  <div>
+                    {displayImageUrl && (
+                      <img
+                        src={displayImageUrl}
+                        alt={item.name}
+                        className="mb-2 aspect-square w-full rounded-xl object-cover"
+                      />
+                    )}
 
-                  <div className="w-full">
-                    <div className="mb-2 flex aspect-square items-center justify-center rounded-xl bg-[#f7f5ee] p-2">
-                      {imageUrl ? (
-                        // eslint-disable-next-line @next/next/no-img-element
-                        <img
-                          src={imageUrl}
-                          alt={item.name_ja}
-                          loading="lazy"
-                          className="h-full w-full object-contain transition group-hover:scale-105"
-                        />
-                      ) : (
-                        <span className="text-xs text-[#a3998c]">No Image</span>
-                      )}
+                    <div className="flex items-center justify-between gap-1 text-[10px] text-[#786e63]">
+                      <span className="truncate">
+                        {item.category}
+                        {hasMultipleColorVariants ? `・${totalColorsCount}色` : ''}
+                      </span>
+                    {hasColorVariants && (
+                    <span
+                        className={`shrink-0 font-semibold ${
+                        isOwned ? 'text-[#2b6e53]' : 'text-[#786e63]'
+                        }`}
+                    >
+                        {isOwned ? '所持済み' : `${ownedColorsCount}/${totalColorsCount}色`}
+                    </span>
+                    )}
                     </div>
 
-                    <p className="line-clamp-2 text-sm font-semibold leading-snug text-[#2f2923]">
-                      {item.name_ja}
-                    </p>
-                    {item.name_en !== item.name_ja && (
-                      <p className="mt-0.5 line-clamp-1 text-[11px] text-[#8c8275]">
-                        {item.name_en}
-                      </p>
-                    )}
+                    <h2 className="mt-0.5 line-clamp-2 text-xs font-bold text-[#2f2923]">
+                      {item.name}
+                    </h2>
                   </div>
 
-                  <div className="mt-2 flex w-full items-center justify-between gap-1 border-t border-[#f0ece1] pt-2">
-                    <span className="truncate rounded-md bg-[#f2efe6] px-1.5 py-0.5 text-[10px] text-[#6b6156]">
-                      {item.category}
-                    </span>
-                    {hasMultipleVariants && (
-                      <span className="shrink-0 text-[10px] font-semibold text-[#2b6e53]">
-                        {ownedVariantsCount}/{item.item_variants.length}種
-                      </span>
-                    )}
-                  </div>
-                </button>
+                  {/* カラバリごとの所持チェックボタン */}
+                  {hasColorVariants ? (
+                <div className="mt-2 flex flex-wrap gap-1">
+                    {colorEntries.map(({ variantId, color }, idx) => {
+                    const key = `${variantId}:${color}:${idx}`;
+                    const isColorOwned = ownedVariantKeys.has(`${variantId}:${color}`);
+
+                    return (
+                        <button
+                        key={key}
+                        type="button"
+                        disabled={!user}
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            toggleVariantColor(variantId, color);
+                        }}
+                        className={`rounded-full border px-2 py-0.5 text-[10px] font-medium transition ${
+                            isColorOwned
+                            ? 'border-[#2b6e53] bg-[#2b6e53] text-white'
+                            : 'border-[#d6cebc] bg-[#faf7f0] text-[#5c5349] hover:bg-[#ebe5d5]'
+                        } disabled:cursor-not-allowed disabled:opacity-60`}
+                        >
+                        {isColorOwned ? '✓ ' : ''}
+                        {color}
+                        </button>
+                    );
+                    })}
+                </div>
+                ) : primaryVariant ? (
+                <div className="mt-2">
+                    <button
+                    type="button"
+                    disabled={!user || savingIds.has(primaryVariant.id)}
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        toggleOwned(primaryVariant.id);
+                    }}
+                    className={`rounded-full border px-2.5 py-0.5 text-[10px] font-medium transition ${
+                        isNoColorOwned
+                        ? 'border-[#2b6e53] bg-[#2b6e53] text-white'
+                        : 'border-[#d6cebc] bg-[#faf7f0] text-[#5c5349] hover:bg-[#ebe5d5]'
+                    } disabled:cursor-not-allowed disabled:opacity-60`}
+                    >
+                    {isNoColorOwned ? '✓ 所持済み' : '未所持'}
+                    </button>
+                </div>
+                ) : (
+                <p className="mt-2 text-[10px] text-[#9b9184]">
+                    登録データなし
+                </p>
+                )}
+                </div>
               );
             })}
-          </div>
-        )}
-
-        {/* ページネーション */}
-        {totalPages > 1 && (
-          <div className="mt-8 flex items-center justify-center gap-3">
-            <button
-              type="button"
-              disabled={currentPage <= 1}
-              onClick={() => {
-                setPage((p) => Math.max(1, p - 1));
-                window.scrollTo({ top: 0, behavior: 'smooth' });
-              }}
-              className="rounded-full border border-[#d6cebc] bg-white px-4 py-1.5 text-xs font-medium disabled:opacity-40"
-            >
-              ← 前へ
-            </button>
-            <span className="text-xs font-medium text-[#5c5349]">
-              {currentPage} / {totalPages} ページ
-            </span>
-            <button
-              type="button"
-              disabled={currentPage >= totalPages}
-              onClick={() => {
-                setPage((p) => Math.min(totalPages, p + 1));
-                window.scrollTo({ top: 0, behavior: 'smooth' });
-              }}
-              className="rounded-full border border-[#d6cebc] bg-white px-4 py-1.5 text-xs font-medium disabled:opacity-40"
-            >
-              次へ →
-            </button>
           </div>
         )}
       </main>
