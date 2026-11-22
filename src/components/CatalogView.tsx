@@ -48,7 +48,39 @@ export default function CatalogView({
   const [password, setPassword] = useState('');
   const [authError, setAuthError] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
+  const initialDisplayName =
+    user?.user_metadata?.display_name || user?.email?.split('@')[0] || 'ユーザー';
 
+  const [displayName, setDisplayName] = useState('');
+  const [currentUserName, setCurrentUserName] = useState(initialDisplayName);
+  const [isEditingName, setIsEditingName] = useState(false);
+  const [draftName, setDraftName] = useState(initialDisplayName);
+  const [savingName, setSavingName] = useState(false);
+  const [nameMessage, setNameMessage] = useState('');
+
+  const handleUpdateDisplayName = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmed = draftName.trim();
+    if (!trimmed) return;
+
+    setSavingName(true);
+    setNameMessage('');
+    const { data, error } = await supabase.auth.updateUser({
+        data: { display_name: trimmed },
+    });
+    setSavingName(false);
+
+    if (error) {
+        setNameMessage('変更に失敗しました');
+        return;
+    }
+
+    const updatedName = data.user?.user_metadata?.display_name || trimmed;
+    setCurrentUserName(updatedName);
+    setIsEditingName(false);
+    setNameMessage('');
+    };
+  
   const activeItem = useMemo(
     () => initialItems.find((item) => item.id === activeItemId) ?? null,
     [initialItems, activeItemId]
@@ -69,6 +101,15 @@ export default function CatalogView({
     };
   }, []);
 
+  // 追加：user が変わったら表示名を同期する
+  useEffect(() => {
+    const nextName =
+      user?.user_metadata?.display_name || user?.email?.split('@')[0] || 'ユーザー';
+    setCurrentUserName(nextName);
+    setDraftName(nextName);
+    setIsEditingName(false);
+  }, [user]);
+  
   // ログインユーザーの所持一覧を取得
   useEffect(() => {
     if (!user) {
@@ -370,15 +411,69 @@ export default function CatalogView({
                 )}
               </div>
 
-              {/* ログインボタン / ユーザー表示 */}
+{/* ログインボタン / ユーザー表示 */}
               {user ? (
-                <button
-                  type="button"
-                  onClick={() => supabase.auth.signOut()}
-                  className="rounded-full border border-[#d6cebc] bg-white px-3.5 py-1.5 text-xs font-medium text-[#5c5349] transition hover:bg-[#f2efe6]"
-                >
-                  ログアウト
-                </button>
+                <div className="relative flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDraftName(currentUserName);
+                      setNameMessage('');
+                      setIsEditingName((prev) => !prev);
+                    }}
+                    title="クリックしてユーザー名を変更"
+                    className="rounded-full border border-[#d6cebc] bg-[#f7f4ea] px-3.5 py-1.5 text-xs font-semibold text-[#2f2923] transition hover:bg-[#ebe5d5]"
+                  >
+                    {currentUserName} さん
+                  </button>
+
+                  {isEditingName && (
+                    <form
+                      onSubmit={handleUpdateDisplayName}
+                      className="absolute right-0 top-10 z-30 w-64 rounded-xl border border-[#d6cebc] bg-[#fbf9f2] p-3 shadow-lg"
+                    >
+                      <p className="mb-1.5 text-xs font-semibold text-[#2f2923]">
+                        ユーザー名を設定・変更
+                      </p>
+                      <input
+                        type="text"
+                        value={draftName}
+                        onChange={(e) => setDraftName(e.target.value)}
+                        maxLength={20}
+                        placeholder="表示したい名前を入力"
+                        autoFocus
+                        className="mb-2 w-full rounded-lg border border-[#d6cebc] bg-white px-2.5 py-1.5 text-xs text-[#2f2923] outline-none focus:border-[#3fa37a]"
+                      />
+                      {nameMessage && (
+                        <p className="mb-2 text-[11px] text-red-600">{nameMessage}</p>
+                      )}
+                      <div className="flex justify-end gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => setIsEditingName(false)}
+                          className="rounded-lg px-2.5 py-1 text-xs text-[#5c5349] hover:bg-[#ebe5d5]"
+                        >
+                          キャンセル
+                        </button>
+                        <button
+                          type="submit"
+                          disabled={savingName || !draftName.trim()}
+                          className="rounded-lg bg-[#2b6e53] px-3 py-1 text-xs font-semibold text-white transition hover:bg-[#235a44] disabled:opacity-50"
+                        >
+                          {savingName ? '保存中...' : '保存'}
+                        </button>
+                      </div>
+                    </form>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => supabase.auth.signOut()}
+                    className="rounded-full border border-[#d6cebc] bg-white px-3.5 py-1.5 text-xs font-medium text-[#5c5349] transition hover:bg-[#f2efe6]"
+                  >
+                    ログアウト
+                  </button>
+                </div>
               ) : (
                 <button
                   type="button"
@@ -462,7 +557,7 @@ export default function CatalogView({
                 </button>
               ))}
             </div>
-            
+
             <div className="flex flex-1 gap-1.5 overflow-x-auto pb-1">
               <button
                 type="button"
